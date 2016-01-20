@@ -246,6 +246,7 @@ public class Siren: NSObject {
     private var updaterWindow: UIWindow?
     
     private var versionChecker: SirenVersionChecker?
+    private var alertIsDisplayed: Bool = false
     
     // MARK: Initialization
     public class var sharedInstance: Siren {
@@ -681,7 +682,7 @@ private extension Siren {
     
     // Actions
     func launchAppStore() {
-        let iTunesString =  "https://itunes.apple.com/app/id\(appID!)"
+        let iTunesString =  "itms-apps://itunes.apple.com/app/id\(appID!)"
         let iTunesURL = NSURL(string: iTunesString)
         UIApplication.sharedApplication().openURL(iTunesURL!)
     }
