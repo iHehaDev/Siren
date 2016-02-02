@@ -127,6 +127,7 @@ public class Siren: NSObject {
     // MARK: Constants
     // Current installed version of your app
     let currentInstalledVersion = NSBundle.mainBundle().currentInstalledVersion()
+    let currentInstalledBundleVersion = NSBundle.mainBundle().currentInstalledBundleVersion()
     
     // NSBundle path for localization
     let bundlePath = NSBundle.mainBundle().pathForResource("Siren", ofType: "Bundle")
@@ -246,6 +247,7 @@ public class Siren: NSObject {
     // Private
     private var lastVersionCheckPerformedOnDate: NSDate?
     private var currentAppStoreVersion: String?
+    private var currentBuildNumber: String?
     private var updaterWindow: UIWindow?
     
     private var versionChecker: SirenVersionChecker?
@@ -501,7 +503,6 @@ class ManifestVersionChecker: SirenVersionChecker {
             let bundle = items[0] as? [String: AnyObject],
             let metadata = bundle["metadata"] as? [String: AnyObject],
             let version = metadata["bundle-version"] as? String
-            
             else {
                 if siren.debugEnabled {
                     print("[Siren] Error retrieving manifest as there was no data returned")
@@ -509,7 +510,11 @@ class ManifestVersionChecker: SirenVersionChecker {
                 return
         }
         
+        let build_number = metadata["build-version"] as? String
+        
         siren.currentAppStoreVersion = version
+        siren.currentBuildNumber = build_number
+        
         if siren.isAppStoreVersionNewer() {
             siren.showAlertIfCurrentAppStoreVersionNotSkipped()
         } else if siren.debugEnabled {
@@ -639,6 +644,20 @@ private extension Siren {
             if (currentInstalledVersion.compare(currentAppStoreVersion, options: .NumericSearch) == NSComparisonResult.OrderedAscending) {
                 newVersionExists = true
             }
+            else if (currentInstalledVersion.compare(currentAppStoreVersion, options: .NumericSearch) == NSComparisonResult.OrderedSame) {
+                if let _ = currentInstalledBundleVersion {
+                    let currentInstalledBundleVersionInt = Int(currentInstalledBundleVersion!)
+                    if let _ = currentBuildNumber {
+                        let currentAppStoreBuildNumber = Int(currentBuildNumber!)
+                        
+                        if ( currentAppStoreBuildNumber > currentInstalledBundleVersionInt)
+                        {
+                            newVersionExists = true
+                        }
+                    }
+                }
+            }
+//            check current build number
         }
         
         return newVersionExists
@@ -670,6 +689,20 @@ private extension Siren {
                 alertType = patchUpdateAlertType
             } else if newVersion.count > 3 && (oldVersion.count <= 3 || newVersion[3] > oldVersion[3]) { // a.b.c.D
                 alertType = revisionUpdateAlertType
+            } else if (currentInstalledVersion == currentAppStoreVersion) {
+                
+                if let _ = currentInstalledBundleVersion {
+                    let currentInstalledBundleVersionInt = Int(currentInstalledBundleVersion!)
+                    if let _ = currentBuildNumber {
+                        let currentAppStoreBuildNumber = Int(currentBuildNumber!)
+                        
+                        if ( currentAppStoreBuildNumber > currentInstalledBundleVersionInt)
+                        {
+                            alertType = revisionUpdateAlertType
+                        }
+                    }
+                }
+                
             }
         }
         
@@ -746,6 +779,10 @@ private extension Siren {
 private extension NSBundle {
     func currentInstalledVersion() -> String? {
         return NSBundle.mainBundle().objectForInfoDictionaryKey("CFBundleShortVersionString") as? String
+    }
+    
+    func currentInstalledBundleVersion() -> String? {
+        return NSBundle.mainBundle().objectForInfoDictionaryKey("CFBundleVersion") as? String
     }
 
     func sirenBundlePath() -> String {
