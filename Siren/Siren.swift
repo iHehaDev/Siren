@@ -51,6 +51,14 @@ public enum SirenVersionCheckType: Int {
 }
 
 /**
+    Determines the method used to perform the version check
+*/
+public enum SirenVersionCheckMethod {
+    case AppStore           // Use the version available in the app store (default)
+    case Manifest(String)   // Use the version described in a manifest plist (for enterprise distribution)
+}
+
+/**
     Determines the available languages in which the update message and alert button titles should appear.
     
     By default, the operating system's default lanuage setting is used. However, you can force a specific language
@@ -94,6 +102,18 @@ public enum SirenLanguageType: String {
 private enum SirenUserDefaults: String {
     case StoredVersionCheckDate     // NSUserDefault key that stores the timestamp of the last version check
     case StoredSkippedVersion       // NSUserDefault key that stores the version that a user decided to skip
+}
+
+
+// MARK: SirenVersionChecker
+/**
+Protocol to implement version checking given the two methods (AppStore and Manifest)
+*/
+
+protocol SirenVersionChecker {
+    init (singleton: Siren)
+    func performVersionCheck(versionURLString: String)
+    func processVersionCheckResults(lookupResults: [String: AnyObject])
 }
 
 // MARK: Siren
@@ -185,6 +205,9 @@ public class Siren: NSObject {
     */
     public var revisionUpdateAlertType = SirenAlertType.Option
     
+    
+    public var checkMethod = SirenVersionCheckMethod.AppStore
+    
     // Required Vars
     /**
         The App Store / iTunes Connect ID for your app.
@@ -224,6 +247,9 @@ public class Siren: NSObject {
     private var lastVersionCheckPerformedOnDate: NSDate?
     private var currentAppStoreVersion: String?
     private var updaterWindow: UIWindow?
+    
+    private var versionChecker: SirenVersionChecker?
+    private var alertIsDisplayed: Bool = false
     
     // MARK: Initialization
     public class var sharedInstance: Siren {
@@ -269,8 +295,40 @@ public class Siren: NSObject {
     
     private func performVersionCheck() {
         
+        var checker: SirenVersionChecker?
+        var checkURLString: String?
+        
+        switch checkMethod {
+        case .AppStore:
+            
+            checker = AppStoreVersionChecker(singleton: self)
+            checkURLString = iTunesURLString()
+            
+        case .Manifest(let manifestURLString):
+            
+            checker = ManifestVersionChecker(singleton: self)
+            checkURLString = manifestURLString
+        }
+        
+        checker?.performVersionCheck(checkURLString!)
+    }
+    
+}
+
+// MARK: VersionCheckers
+
+class AppStoreVersionChecker: SirenVersionChecker {
+    
+    var siren: Siren
+    
+    required init(singleton: Siren) {
+        self.siren = singleton
+    }
+    
+    func performVersionCheck(versionURLString: String) {
+        
         // Create Request
-        let itunesURL = iTunesURLFromString()
+        let itunesURL = NSURL(string: versionURLString)!
         let request = NSMutableURLRequest(URL: itunesURL)
         request.HTTPMethod = "GET"
         
@@ -279,12 +337,12 @@ public class Siren: NSObject {
         let task = session.dataTaskWithRequest(request, completionHandler: { (data, response, error) -> Void in
             
             if let error = error {
-                if self.debugEnabled {
+                if self.siren.debugEnabled {
                     print("[Siren] Error retrieving App Store data as an error was returned: \(error.localizedDescription)")
                 }
             } else {
                 guard let data = data else {
-                    if self.debugEnabled {
+                    if self.siren.debugEnabled {
                         print("[Siren] Error retrieving App Store data as no data was returned.")
                     }
                     return
@@ -295,7 +353,7 @@ public class Siren: NSObject {
                     let jsonData = try NSJSONSerialization.JSONObjectWithData(data, options: NSJSONReadingOptions.AllowFragments)
                     
                     guard let appData = jsonData as? [String: AnyObject] else {
-                        if self.debugEnabled {
+                        if self.siren.debugEnabled {
                             print("[Siren] Error parsing App Store JSON data.")
                         }
                         return
@@ -304,7 +362,7 @@ public class Siren: NSObject {
                     dispatch_async(dispatch_get_main_queue(), { () -> Void in
                         
                         // Print iTunesLookup results from appData
-                        if self.debugEnabled {
+                        if self.siren.debugEnabled {
                             print("[Siren] JSON results: \(appData)")
                         }
                         
@@ -314,7 +372,7 @@ public class Siren: NSObject {
                     })
                     
                 } catch let error as NSError {
-                    if self.debugEnabled {
+                    if self.siren.debugEnabled {
                         print("[Siren] Error retrieving App Store data as data was nil: \(error.localizedDescription)")
                     }
                 }
@@ -325,41 +383,141 @@ public class Siren: NSObject {
         task.resume()
     }
     
-    private func processVersionCheckResults(lookupResults: [String: AnyObject]) {
+    internal func processVersionCheckResults(lookupResults: [String: AnyObject]) {
         
         // Store version comparison date
-        storeVersionCheckDate()
-
+        siren.storeVersionCheckDate()
+        
         guard let results = lookupResults["results"] as? [[String: AnyObject]] else {
-            if debugEnabled {
+            if siren.debugEnabled {
                 print("[Siren] Error retrieving App Store verson number as there was no data returned")
             }
             return
         }
         
         if results.isEmpty == false { // Conditional that avoids crash when app not in App Store or appID mistyped
-            currentAppStoreVersion = results[0]["version"] as? String
-            guard let _ = currentAppStoreVersion else {
-                if debugEnabled {
+            siren.currentAppStoreVersion = results[0]["version"] as? String
+            guard let _ = siren.currentAppStoreVersion else {
+                if siren.debugEnabled {
                     print("[Siren] Error retrieving App Store verson number as results[0] does not contain a 'version' key")
                 }
                 return
             }
             
-            if isAppStoreVersionNewer() {
-                showAlertIfCurrentAppStoreVersionNotSkipped()
+            if siren.isAppStoreVersionNewer() {
+                siren.showAlertIfCurrentAppStoreVersionNotSkipped()
             } else {
-                if debugEnabled {
+                if siren.debugEnabled {
                     print("[Siren] App Store version of app is not newer")
                 }
             }
-           
+            
         } else { // lookupResults does not contain any data as the returned array is empty
-            if debugEnabled {
+            if siren.debugEnabled {
                 print("[Siren] Error retrieving App Store verson number as results returns an empty array")
             }
         }
     }
+
+}
+
+class ManifestVersionChecker: SirenVersionChecker {
+    
+    var siren: Siren
+    
+    required init(singleton: Siren) {
+        self.siren = singleton
+    }
+    
+    func performVersionCheck(versionURLString: String) {
+        
+        let manifestURL = NSURL(string: versionURLString)!
+        let request = NSMutableURLRequest(URL: manifestURL)
+        request.cachePolicy = NSURLRequestCachePolicy.ReloadIgnoringCacheData
+        request.HTTPMethod = "GET"
+        
+        // Perform Request
+        let session = NSURLSession.sharedSession()
+        let task = session.dataTaskWithRequest(request) { data, response, error in
+            
+            guard let _ = response else {
+                if let error = error {
+                    if self.siren.debugEnabled {
+                        print("[Siren] Error retrieving manifest as an error was returned: \(error.localizedDescription)")
+                    }
+                }
+                return
+            }
+            
+            guard let data = data else {
+                if self.siren.debugEnabled {
+                    print("[Siren] Error retrieving manifest as no data was returned.")
+                }
+                return
+            }
+            
+            // Convert XML data to Swift Dictionary of type [String: AnyObject]
+            
+            do {
+                let plistData = try NSPropertyListSerialization.propertyListWithData(data, options: NSPropertyListReadOptions.Immutable, format: nil)
+                
+                guard let appData = plistData as? [String: AnyObject] else {
+                    if self.siren.debugEnabled {
+                        print("[Siren] Error parsing manifest plist data.")
+                    }
+                    return
+                }
+                
+                dispatch_async(dispatch_get_main_queue(), { () -> Void in
+                    
+                    // Print iTunesLookup results from appData
+                    if self.siren.debugEnabled {
+                        print("[Siren] plist results: \(appData)")
+                    }
+                    
+                    // Process Results (e.g., extract current version on the AppStore)
+                    self.processVersionCheckResults(appData)
+                    
+                })
+                
+            } catch {
+                if self.siren.debugEnabled {
+                    print("[Siren] Error retrieving manifest data as data was nil: \(error)")
+                }
+            }
+        }
+        
+        
+        task.resume()
+        
+    }
+    
+    internal func processVersionCheckResults(lookupResults: [String: AnyObject]) {
+        
+        // Store version comparison date
+        siren.storeVersionCheckDate()
+        
+        guard let items = lookupResults["items"] as? [AnyObject],
+            let bundle = items[0] as? [String: AnyObject],
+            let metadata = bundle["metadata"] as? [String: AnyObject],
+            let version = metadata["bundle-version"] as? String
+            
+            else {
+                if siren.debugEnabled {
+                    print("[Siren] Error retrieving manifest as there was no data returned")
+                }
+                return
+        }
+        
+        siren.currentAppStoreVersion = version
+        if siren.isAppStoreVersionNewer() {
+            siren.showAlertIfCurrentAppStoreVersionNotSkipped()
+        } else if siren.debugEnabled {
+            print("[Siren] Manifest version of app is not newer")
+        }
+    }
+
+    
 }
 
 // MARK: Alert
@@ -415,7 +573,7 @@ private extension Siren {
         let title = localizedUpdateButtonTitle()
         let action = UIAlertAction(title: title, style: .Default) { (alert: UIAlertAction) -> Void in
             self.hideWindow()
-            self.launchAppStore()
+            self.launchUpdate()
             self.delegate?.sirenUserDidLaunchAppStore?()
             return
         }
@@ -452,8 +610,8 @@ private extension Siren {
 
 // MARK: Helpers
 private extension Siren {
-    func iTunesURLFromString() -> NSURL {
-        
+    
+    func iTunesURLString() -> String {
         var storeURLString = "https://itunes.apple.com/lookup?id=\(appID!)"
         
         if let countryCode = countryCode {
@@ -463,8 +621,8 @@ private extension Siren {
         if debugEnabled {
             print("[Siren] iTunes Lookup URL: \(storeURLString)")
         }
-        
-        return NSURL(string: storeURLString)!
+
+        return storeURLString
     }
     
     func daysSinceLastVersionCheckDate(lastVersionCheckPerformedOnDate: NSDate) -> Int {
@@ -527,9 +685,19 @@ private extension Siren {
     
     // Actions
     func launchAppStore() {
-        let iTunesString =  "https://itunes.apple.com/app/id\(appID!)"
+        let iTunesString =  "itms-apps://itunes.apple.com/app/id\(appID!)"
         let iTunesURL = NSURL(string: iTunesString)
         UIApplication.sharedApplication().openURL(iTunesURL!)
+    }
+    
+    func launchUpdate() {
+        switch self.checkMethod {
+        case .AppStore:
+            launchAppStore()
+        case .Manifest(let manifestUrl):
+            let updateAddress = NSURL(string: "itms-services://?action=download-manifest&url=itms-services://?action=download-manifest&url=\(manifestUrl)")!
+            UIApplication.sharedApplication().openURL(updateAddress)
+        }
     }
 }
 
